@@ -20,8 +20,11 @@ from openfermion.circuits import uccsd_singlet_generator, uccsd_singlet_paramsiz
 import openfermion as of
 import numpy as np
 
-import qiskit.opflow as qk_opflow
+# import qiskit.opflow as qk_opflow
+from qiskit.quantum_info import SparsePauliOp
+from qiskit.circuit.library import PauliEvolutionGate
 import qiskit.quantum_info as qk_qi
+from qiskit.synthesis.evolution import LieTrotter, SuzukiTrotter
 
 __all__ = [
     'singlet_evolution',
@@ -31,11 +34,16 @@ __all__ = [
 singlet_paramsize = uccsd_singlet_paramsize
 
 
-def singlet_evolution(packed_amplitudes, n_qubits, n_electrons,
-                      fermion_transform=jordan_wigner):
-
+def singlet_evolution(
+    packed_amplitudes,
+    n_qubits: int,
+    n_electrons: int,
+    fermion_transform=jordan_wigner,
+    trotter_mode:str='suzuki',
+    reps:int=2,
+) -> PauliEvolutionGate:
     """\
-    Create a Qiskit evolution opflow for a UCCSD singlet circuit
+    Create a Qiskit evolution gate for a UCCSD singlet circuit
 
     Args:
         packed_amplitudes(ndarray): compact array storing the unique single
@@ -47,10 +55,12 @@ def singlet_evolution(packed_amplitudes, n_qubits, n_electrons,
         n_electrons(int): number of electrons in the physical system
         fermion_transform(openfermion.transform): The transformation that
             defines the mapping from Fermions to QubitOperator
+        trotter_mode(str): The Trotterization mode to use. Either 'suzuki' or
+            'lie'. Default is 'suzuki'.
+        reps(int): Number of repetitions for the Trotterization. Default is 2.
 
     Returns:
-        evolution_op(EvolvedOp): The unitary opflow that constructs the
-            UCCSD singlet state
+        PauliEvolutionGate: The evolution gate for the UCCSD singlet circuit
     """
 
   # From OpenFermion: The uccsd_singlet_generator generates a FermionOperator
@@ -67,7 +77,8 @@ def singlet_evolution(packed_amplitudes, n_qubits, n_electrons,
     qubit_generator.compress()
 
   # Translate the OpenFermion QubitOperators to Qiskit opflow
-    opflow = list()
+    pauli_strings = []
+    coeffs = []
     for paulis, coeff in sorted(qubit_generator.terms.items()):
         ops = ['I']*n_qubits
         for term in paulis:
@@ -75,14 +86,20 @@ def singlet_evolution(packed_amplitudes, n_qubits, n_electrons,
 
         ops.reverse()
 
-        opflow1 = coeff*getattr(qk_opflow, ops[0])
-        for i in range(1, n_qubits):
-            opflow1 ^= getattr(qk_opflow, ops[i])
+        pauli_strings.append(''.join(ops))
+        coeffs.append(coeff)
 
-        opflow.append(opflow1)
+    opflow = SparsePauliOp(pauli_strings, coeffs=np.array(coeffs, dtype=np.complex128))
 
   # Exponentiate one time step
     time = 1.
-    evolution_op = (time*sum(opflow)).exp_i()
+    # evolution_op = (time*opflow).exp_i()
+    if trotter_mode == 'suzuki':
+        synthesis = SuzukiTrotter(reps=reps)
+    elif trotter_mode == 'lie' or trotter_mode == 'trotter':
+        synthesis = LieTrotter(reps=reps)
+    else:
+        raise ValueError('Invalid trotter_mode. Must be either "suzuki" or "lie".')
+    evolution_op = PauliEvolutionGate(opflow, time=time, synthesis=synthesis)
 
     return evolution_op

@@ -5,16 +5,19 @@ import openfermion as of
 import os
 import qiskit as qk
 import qiskit.converters as qk_cnv
-import qiskit.opflow as qk_opflow
+# import qiskit.opflow as qk_opflow
 import qiskit.quantum_info as qk_qi
 import qiskit.transpiler as qk_tp
 import hubbard.uccsd_evolution as uccsd_evolution
 import scipy.linalg as spla
 import warnings
+from qiskit.quantum_info import SparsePauliOp, Pauli, Statevector
+from qiskit.primitives import Estimator
+from openfermion.ops.operators.qubit_operator import QubitOperator
 
 # allow large matrices from to_matrix() calls
-import qiskit.utils.algorithm_globals as qk_ag
-qk_ag.massive = True
+# import qiskit.utils.algorithm_globals as qk_ag
+# qk_ag.massive = True
 
 __all__ = [
     'EnergyObjective',
@@ -45,14 +48,23 @@ def get_cached_circuit():
 class _HamiltonianMixin:
     """"Helper to abstract commonality of Hamiltonian-based Objective classes"""
 
-    def __init__(self, hamiltonian, n_electrons_up, n_electrons_down):
-        """\
+    def __init__(
+        self,
+        hamiltonian: SparsePauliOp,
+        n_electrons_up: int,
+        n_electrons_down: int
+    ) -> None:
+        """
         Helper to abstract commonality of Hamiltonian-based Objective classes
 
         Args:
-            hamiltonian(opflow): Hamiltonian operator
-            n_electrons_up(int): number of spin-up electrons in the physical system
-            n_electrons_down(int): number of spin-down electrons in the physical system
+            hamiltonian(SparsePauliOp): Hamiltonian operator
+
+            n_electrons_up(int): number of spin-up electrons in the
+                physical system
+
+            n_electrons_down(int): number of spin-down electrons in the
+                physical system
         """
 
         self._hamiltonian = hamiltonian
@@ -87,7 +99,8 @@ class _HamiltonianMixin:
             for i in range(n_electrons_down):
                 reg.x(i*2+1)
 
-        self._state_in = qk_opflow.CircuitStateFn(reg)
+        # self._state_in = Statevector(reg)
+        self._state_in = reg
 
 
 class _UCCSDMixin:
@@ -125,22 +138,30 @@ class _UCCSDMixin:
         elif self._fermion_transform == 'jordan-wigner':
             fermion_transform = of.transforms.jordan_wigner
 
-        evolution_op = uccsd_evolution.singlet_evolution(
-                           packed_amplitudes, self._n_qubits, self._n_electrons,
-                           fermion_transform=fermion_transform)
+        trotterized_ev_op = uccsd_evolution.singlet_evolution(
+            packed_amplitudes,
+            self._n_qubits,
+            self._n_electrons,
+            fermion_transform=fermion_transform,
+            trotter_mode=trotter_mode,
+            reps=num_time_slices,
+        )
 
-      # Trotterize the evolution operator flow to be able to construct a circuit (the
-      # choice of 2 slices was empirically determined; it may not fit all cases)
-        if 0 < num_time_slices:
-            trotterized_ev_op = qk_opflow.PauliTrotterEvolution(
-                trotter_mode=trotter_mode, reps=num_time_slices).convert(evolution_op)
+        trotterized_ev_op = self._optimize_evolution_imp(trotterized_ev_op)
 
-          # Optionally run circuit optimizer as implemented in derived class
-            trotterized_ev_op = self._optimize_evolution_imp(trotterized_ev_op)
+        return trotterized_ev_op
+      # # Trotterize the evolution operator flow to be able to construct a circuit (the
+      # # choice of 2 slices was empirically determined; it may not fit all cases)
+      #   if 0 < num_time_slices:
+      #       trotterized_ev_op = qk_opflow.PauliTrotterEvolution(
+      #           trotter_mode=trotter_mode, reps=num_time_slices).convert(evolution_op)
 
-            evolution_op = trotterized_ev_op
+      #     # Optionally run circuit optimizer as implemented in derived class
+      #       trotterized_ev_op = self._optimize_evolution_imp(trotterized_ev_op)
 
-        return evolution_op
+      #       evolution_op = trotterized_ev_op
+
+      #   return evolution_op
 
     def _optimize_evolution_imp(self, evolution_op):
         try:
@@ -150,9 +171,12 @@ class _UCCSDMixin:
 
         try:
             from bqskit.ext import qiskit_to_bqskit, bqskit_to_qiskit
-            circuit = qk.transpile(evolution_op.to_circuit(), basis_gates=["u3", "cx"])
+            circuit = qk.QuantumCircuit(self._n_qubits)
+            circuit.append(evolution_op, circuit.qubits)
+            circuit = qk.transpile(circuit, basis_gates=["u3", "cx"])
             opt_circuit = self.optimize_evolution(qiskit_to_bqskit(circuit))
-            return qk.opflow.primitive_ops.CircuitOp(bqskit_to_qiskit(opt_circuit))
+            # return qk.opflow.primitive_ops.CircuitOp(bqskit_to_qiskit(opt_circuit))
+            return bqskit_to_qiskit(opt_circuit)
         except Exception as e:
             print('Failed in optimize_evolution:', e)
             raise
@@ -161,29 +185,53 @@ class _UCCSDMixin:
 
 
 class EnergyObjective(_HamiltonianMixin, _UCCSDMixin):
-    def __init__(self, hamiltonian, n_electrons_up, n_electrons_down,
-                 trotter_steps=1, trotter_mode='suzuki', noise_model=None, shots=-1,
-                 save_evals=None):
-        """\
+    def __init__(
+        self,
+        hamiltonian: SparsePauliOp,
+        n_electrons_up: int,
+        n_electrons_down: int,
+        trotter_steps: int = 1,
+        trotter_mode: str = 'suzuki',
+        noise_model = None,
+        shots: int = -1,
+        save_evals: str = None
+    ) -> None:
+        """
         Create an energy estimater for the given Hamiltonian
 
         Args:
-            hamiltonian(opflow): Hamiltonian operator
-            n_electrons_up(int): number of spin-up electrons in the physical system
-            n_electrons_down(int): number of spin-down electrons in the physical system
-            trotter_steps(int): number of Trotter time slices for the evolution
-            noise_model(NoiseModel): Qiskit noise model to apply
-            shots(int): number of shots to sample and average over
-            save_evals(str): file name to store evaluations or None
+            - hamiltonian(SparsePauliOp): Hamiltonian operator
+
+            - n_electrons_up(int): number of spin-up electrons in the
+                physical system
+
+            - n_electrons_down(int): number of spin-down electrons in
+                the physical system
+
+            - trotter_steps(int): number of Trotter time slices for the
+                evolution
+
+            - trotter_mode(str): Trotterization mode to use. Options are
+                'suzuki' and 'lie'
+
+            - noise_model(NoiseModel): Qiskit noise model to apply
+
+            - shots(int): number of shots to sample and average over, if
+                0 or less, exact simulations are computed
+
+            - save_evals(str): file name to store evaluations or None
         """
 
-        if isinstance(hamiltonian, of.ops.operators.qubit_operator.QubitOperator):
-            hamiltonian = _to_qiskit(hamiltonian, of.utils.count_qubits(hamiltonian))
+        if isinstance(hamiltonian, QubitOperator):
+            hamiltonian = _to_qiskit(
+                hamiltonian,
+                of.utils.count_qubits(hamiltonian)
+            )
 
         super().__init__(hamiltonian, n_electrons_up, n_electrons_down)
 
       # Create an observable from the Hamiltonian
-        meas_op = qk_opflow.StateFn(self._hamiltonian, is_measurement=True)
+        # meas_op = qk_opflow.StateFn(self._hamiltonian, is_measurement=True)
 
       # Number of Trotter steps to use in the evolution operator (see __call__)
         self._trotter_steps = trotter_steps
@@ -193,62 +241,63 @@ class EnergyObjective(_HamiltonianMixin, _UCCSDMixin):
         if shots <= 0 and noise_model is None:
             self._simulator = None
             self._meas_components = None
-            self._expectation = qk_opflow.MatrixExpectation()
-            self._meas_op = self._expectation.convert(meas_op)
-        else:
-            self._expectation = qk_opflow.PauliExpectation()
-            if noise_model is None:
-                backend = qk.Aer.get_backend('qasm_simulator')
-            else:
-              # nominally, options should pass through kwargs of get_backend, however,
-              # this does not appear to work for Aer, so set the noise_model option
-              # explicitly on the retrieved backend
-                if type(noise_model) == str:
-                  # use an existing, named, IBM backend from the qiskit test suite to
-                  # create a realistic noise model; if 'realistic' default to Montreal
-                    if noise_model.lower() == 'realistic':
-                        noise_model = 'Montreal'
+            # self._expectation = qk_opflow.MatrixExpectation()
+            # self._meas_op = self._expectation.convert(meas_op)
 
-                    import qiskit.test.mock as qk_mock
-                    import qiskit.providers.aer as qk_aer_provides
+      #   else:
+      #       self._expectation = qk_opflow.PauliExpectation()
+      #       if noise_model is None:
+      #           backend = qk.Aer.get_backend('qasm_simulator')
+      #       else:
+      #         # nominally, options should pass through kwargs of get_backend, however,
+      #         # this does not appear to work for Aer, so set the noise_model option
+      #         # explicitly on the retrieved backend
+      #           if type(noise_model) == str:
+      #             # use an existing, named, IBM backend from the qiskit test suite to
+      #             # create a realistic noise model; if 'realistic' default to Montreal
+      #               if noise_model.lower() == 'realistic':
+      #                   noise_model = 'Montreal'
 
-                    fake_backend = 'Fake'+noise_model[0].upper()+noise_model[1:]
-                    fake_device  = getattr(qk_mock, fake_backend)()
+      #               import qiskit.test.mock as qk_mock
+      #               import qiskit.providers.aer as qk_aer_provides
 
-                    backend = qk_aer_provides.AerSimulator.from_backend(fake_device)
-                else:
-                    backend = qk.Aer.get_backend('aer_simulator', noise_model=noise_model)
-                    backend.set_options(noise_model=noise_model)
+      #               fake_backend = 'Fake'+noise_model[0].upper()+noise_model[1:]
+      #               fake_device  = getattr(qk_mock, fake_backend)()
 
-                if shots <= 0:
-                  # if not simulating sampling, use the AerPauliExpectation, which computes
-                  # the expectation value given the noise (effectively "infinite" sampling);
-                  # it also passes a special "instruction" to the sampler to ignore shots
-                  # TODO: this approach negates measurement noise, which it shouldn't if there
-                  # is a bias! At least add a warning?
-                     self._expectation = qk_opflow.AerPauliExpectation()
-                     shots = 8192   # only matters if we care about (estimated) variance
-                     self._is_sampling = False
-                else:
-                     self._is_sampling = True
+      #               backend = qk_aer_provides.AerSimulator.from_backend(fake_device)
+      #           else:
+      #               backend = qk.Aer.get_backend('aer_simulator', noise_model=noise_model)
+      #               backend.set_options(noise_model=noise_model)
 
-            self._simulator = qk_opflow.CircuitSampler(backend=backend)
-            self._simulator.quantum_instance.run_config.shots = shots
+      #           if shots <= 0:
+      #             # if not simulating sampling, use the AerPauliExpectation, which computes
+      #             # the expectation value given the noise (effectively "infinite" sampling);
+      #             # it also passes a special "instruction" to the sampler to ignore shots
+      #             # TODO: this approach negates measurement noise, which it shouldn't if there
+      #             # is a bias! At least add a warning?
+      #                self._expectation = qk_opflow.AerPauliExpectation()
+      #                shots = 8192   # only matters if we care about (estimated) variance
+      #                self._is_sampling = False
+      #           else:
+      #                self._is_sampling = True
 
-          # split measurement components to prevent fake coherent errors
-            primitive = meas_op.primitive
-            try:
-                while 1: primitive = primitive.primitive
-            except AttributeError:
-                pass
+      #       self._simulator = qk_opflow.CircuitSampler(backend=backend)
+      #       self._simulator.quantum_instance.run_config.shots = shots
 
-            self._meas_components = list()
-            for ops, coeff in primitive.to_list():
-                self._meas_components.append(self._expectation.convert(qk_opflow.StateFn(
-                     qk_opflow.PauliOp(qk.quantum_info.Pauli(ops), coeff), is_measurement=True)
-                ))
+      #     # split measurement components to prevent fake coherent errors
+      #       primitive = meas_op.primitive
+      #       try:
+      #           while 1: primitive = primitive.primitive
+      #       except AttributeError:
+      #           pass
 
-            self._meas_op = self._expectation.convert(meas_op)
+      #       self._meas_components = list()
+      #       for ops, coeff in primitive.to_list():
+      #           self._meas_components.append(self._expectation.convert(qk_opflow.StateFn(
+      #                qk_opflow.PauliOp(qk.quantum_info.Pauli(ops), coeff), is_measurement=True)
+      #           ))
+
+      #       self._meas_op = self._expectation.convert(meas_op)
 
       # File name to store evaluations, if requested
         if save_evals:
@@ -284,10 +333,12 @@ class EnergyObjective(_HamiltonianMixin, _UCCSDMixin):
             packed_amplitudes, self._trotter_steps, self._trotter_mode)
 
       # Combine with initializer and evolution
-        expect_op = self._expectation.convert(evolution_op @ self._state_in)
+        # expect_op = self._expectation.convert(evolution_op @ self._state_in)
+        circuit = self._state_in.copy()
+        circuit.append(evolution_op, circuit.qubits)
 
       # Convert to QuantumCircuit
-        circuit = (evolution_op @ self._state_in).to_circuit()
+        # circuit = (evolution_op @ self._state_in).to_circuit()
 
         return circuit
 
@@ -311,11 +362,12 @@ class EnergyObjective(_HamiltonianMixin, _UCCSDMixin):
         global _cached_circuit
         if use_cached_circuit and _cached_circuit is not None:
             evolution_op = _cached_circuit
-        elif isinstance(use_cached_circuit, qk_opflow.operator_base.OperatorBase):
+        elif isinstance(use_cached_circuit, qk.QuantumCircuit):
             evolution_op = use_cached_circuit
         else:
-            evolution_op = self.generate_evolution_op(
-                packed_amplitudes, self._trotter_steps, self._trotter_mode)
+            # evolution_op = self.generate_evolution_op(
+            #     packed_amplitudes, self._trotter_steps, self._trotter_mode)
+            evolution_op = self.generate_circuit(packed_amplitudes)
             if use_cached_circuit:
                 _cached_circuit = evolution_op
 
@@ -324,94 +376,95 @@ class EnergyObjective(_HamiltonianMixin, _UCCSDMixin):
       # calculate the energy from its components
         if self._simulator is None:
           # exact calculation
-            expect_op = self._meas_op @ self._expectation.convert(evolution_op @ self._state_in)
-            energy = np.real(expect_op.eval())
+            # expect_op = self._meas_op @ self._expectation.convert(evolution_op @ self._state_in)
+            # energy = np.real(expect_op.eval())
+            energy = Estimator().run(evolution_op, self._hamiltonian).result().values
 
-        else:
-          # sampled calculation from components
+        # else:
+        #   # sampled calculation from components
 
-          # Note, sampling of the full hamiltonian would look like:
-          #     sampled_op = self._simulator.convert(
-          #                      self._meas_op @ self._expectation.convert(evolution_op @ self._state_in)
-          #                  )
-          #     energy = np.real(sampled_op.eval())
+        #   # Note, sampling of the full hamiltonian would look like:
+        #   #     sampled_op = self._simulator.convert(
+        #   #                      self._meas_op @ self._expectation.convert(evolution_op @ self._state_in)
+        #   #                  )
+        #   #     energy = np.real(sampled_op.eval())
 
-          # if not trotterized, use matrix multiplication to by-pass circuit generation
-          # (uses circuit synthesis instead); note that this will automatically ignore
-          # most gate errors (all of state prep, but the final gates before measurement
-          # will still see errors if supplied)
-            if self._trotter_steps <= 0:
-                ev_state_op = qk_opflow.StateFn(
-                                  evolution_op.to_matrix() @ self._state_in.to_matrix()
-                              )
+        #   # if not trotterized, use matrix multiplication to by-pass circuit generation
+        #   # (uses circuit synthesis instead); note that this will automatically ignore
+        #   # most gate errors (all of state prep, but the final gates before measurement
+        #   # will still see errors if supplied)
+        #     if self._trotter_steps <= 0:
+        #         ev_state_op = qk_opflow.StateFn(
+        #                           evolution_op.to_matrix() @ self._state_in.to_matrix()
+        #                       )
 
-                energy = 0.
-                for meas_op in self._meas_components:
-                    sampled_op = self._simulator.convert(
-                                     self._expectation.convert(meas_op @ ev_state_op)
-                                 )
-                    energy += np.real(sampled_op.eval())
+        #         energy = 0.
+        #         for meas_op in self._meas_components:
+        #             sampled_op = self._simulator.convert(
+        #                              self._expectation.convert(meas_op @ ev_state_op)
+        #                          )
+        #             energy += np.real(sampled_op.eval())
 
-            else:
-              # to ensure that circuits are not unnecessarily transpiled, convert the state prep
-              # circuit external to the component measurement loop and modify the transpiled one
-              # through the simulator cache instead
-                ev_state_expect_op = self._expectation.convert(evolution_op @ self._state_in)
-                if self._is_sampling:
-                  # add a fake measurement to setup proper identities, registers, and labels
-                    ev_state_expect_op = self._meas_components[0] @ ev_state_expect_op
-                self._simulator.convert(ev_state_expect_op)         # ensures caching
-                clean_circuit = self._simulator._cached_ops[ev_state_expect_op.instance_id].transpiled_circ_cache[0]
+        #     else:
+        #       # to ensure that circuits are not unnecessarily transpiled, convert the state prep
+        #       # circuit external to the component measurement loop and modify the transpiled one
+        #       # through the simulator cache instead
+        #         ev_state_expect_op = self._expectation.convert(evolution_op @ self._state_in)
+        #         if self._is_sampling:
+        #           # add a fake measurement to setup proper identities, registers, and labels
+        #             ev_state_expect_op = self._meas_components[0] @ ev_state_expect_op
+        #         self._simulator.convert(ev_state_expect_op)         # ensures caching
+        #         clean_circuit = self._simulator._cached_ops[ev_state_expect_op.instance_id].transpiled_circ_cache[0]
 
-              # remove any existing final measuremens (note: remove_final_measurements()
-              # also wipes the classical register, but we want to keep the same identities)
-                clean_circuit_dag = qk_tp.passes.RemoveFinalMeasurements().run(
-                    qk_cnv.circuit_to_dag(clean_circuit)
-                )
+        #       # remove any existing final measuremens (note: remove_final_measurements()
+        #       # also wipes the classical register, but we want to keep the same identities)
+        #         clean_circuit_dag = qk_tp.passes.RemoveFinalMeasurements().run(
+        #             qk_cnv.circuit_to_dag(clean_circuit)
+        #         )
 
-                clean_circuit.data.clear()
-                clean_circuit._parameter_table.clear()
-                for node in clean_circuit_dag.topological_op_nodes():
-                    inst = node.op.copy()
-                    clean_circuit.append(inst, node.qargs, node.cargs)
+        #         clean_circuit.data.clear()
+        #         clean_circuit._parameter_table.clear()
+        #         for node in clean_circuit_dag.topological_op_nodes():
+        #             inst = node.op.copy()
+        #             clean_circuit.append(inst, node.qargs, node.cargs)
 
-              # simulate measurement components individually to prevent fake coherent errors
-                energy = 0.
-                for meas_op in self._meas_components:
-                  # fresh copy of circuit w/o measurement and update internal cache
-                    comp_circuit = clean_circuit.copy()
-                    self._simulator._cached_ops[ev_state_expect_op.instance_id].transpiled_circ_cache[0] = comp_circuit
+        #       # simulate measurement components individually to prevent fake coherent errors
+        #         energy = 0.
+        #         for meas_op in self._meas_components:
+        #           # fresh copy of circuit w/o measurement and update internal cache
+        #             comp_circuit = clean_circuit.copy()
+        #             self._simulator._cached_ops[ev_state_expect_op.instance_id].transpiled_circ_cache[0] = comp_circuit
 
-                  # add basis rotation for pauli measurement
-                    if self._is_sampling:
-                        meas_circ = meas_op.oplist[1].to_circuit()
-                    else:
-                        meas_circ = meas_op.to_circuit()
+        #           # add basis rotation for pauli measurement
+        #             if self._is_sampling:
+        #                 meas_circ = meas_op.oplist[1].to_circuit()
+        #             else:
+        #                 meas_circ = meas_op.to_circuit()
 
-                    meas_circ_transpiled = self._simulator.quantum_instance.transpile(meas_circ)[0]
-                    meas_dag = qk_cnv.circuit_to_dag(meas_circ_transpiled)
-                    for node in meas_dag.topological_op_nodes():
-                        inst = node.op.copy()
-                        comp_circuit.append(inst, node.qargs, node.cargs)
+        #             meas_circ_transpiled = self._simulator.quantum_instance.transpile(meas_circ)[0]
+        #             meas_dag = qk_cnv.circuit_to_dag(meas_circ_transpiled)
+        #             for node in meas_dag.topological_op_nodes():
+        #                 inst = node.op.copy()
+        #                 comp_circuit.append(inst, node.qargs, node.cargs)
 
-                    if self._is_sampling:
-                      # re-add measurement on all qubits
-                        regs = range(comp_circuit.num_qubits)
-                        comp_circuit.measure(regs, regs)
+        #             if self._is_sampling:
+        #               # re-add measurement on all qubits
+        #                 regs = range(comp_circuit.num_qubits)
+        #                 comp_circuit.measure(regs, regs)
 
-                  # simulate sampling
-                    sampled_op = self._simulator.convert(ev_state_expect_op)
+        #           # simulate sampling
+        #             sampled_op = self._simulator.convert(ev_state_expect_op)
 
-                  # update measurement of the composed op in Z basis and evalaute (note: this
-                  # isn't necessary when not using sampling, b/c there expval_measurement save
-                  # instructions are used as a short-cut (ie. no true measurement)
-                    if self._is_sampling:
-                        sampled_op.oplist[0] = meas_op.oplist[0]
-                        e_comp = np.real(sampled_op.eval())
-                    else:
-                        e_comp = np.real(sampled_op.coeff)
+        #           # update measurement of the composed op in Z basis and evalaute (note: this
+        #           # isn't necessary when not using sampling, b/c there expval_measurement save
+        #           # instructions are used as a short-cut (ie. no true measurement)
+        #             if self._is_sampling:
+        #                 sampled_op.oplist[0] = meas_op.oplist[0]
+        #                 e_comp = np.real(sampled_op.eval())
+        #             else:
+        #                 e_comp = np.real(sampled_op.coeff)
 
-                    energy += e_comp
+        #             energy += e_comp
 
         logger.info('objective: %.5f @ %s', energy, packed_amplitudes)
 
@@ -425,24 +478,29 @@ class EnergyObjective(_HamiltonianMixin, _UCCSDMixin):
 
         return energy
 
-
 def _to_qiskit(of_qop, n_qubits):
     """Convert OpenFermion QubitOperators to Qiskit equivalent"""
 
-    opflow = list()
+    pauli_strings = []
+    coeffs = []
+
     for paulis, coeff in sorted(of_qop.terms.items()):
         ops = ['I']*n_qubits
         for term in paulis:
             ops[term[0]] = term[1]
 
         ops.reverse()
+        
+        pauli_strings.append(''.join(ops))
+        coeffs.append(coeff)
 
-        opflow1 = coeff*getattr(qk_opflow, ops[0])
-        for i in range(1, n_qubits):
-            opflow1 ^= getattr(qk_opflow, ops[i])
-        opflow.append(opflow1)
+        # opflow1 = coeff*getattr(qk_opflow, ops[0])
+        # for i in range(1, n_qubits):
+        #     opflow1 ^= getattr(qk_opflow, ops[i])
+        # opflow.append(opflow1)
 
-    return sum(opflow)
+    # return sum(opflow)
+    return SparsePauliOp(pauli_strings, coeffs=np.array(coeffs))
 
 
 def _hubbard_qubit(x_dimension, y_dimension, tunneling, coulomb,
@@ -501,9 +559,17 @@ def hamiltonian_matrix(x_dimension, y_dimension, tunneling, coulomb,
     return of.linalg.get_sparse_operator(hubbard_qubit).todense()
 
 
-def hamiltonian_qiskit(x_dimension, y_dimension, tunneling, coulomb,
-        chemical_potential = 0.00, magnetic_field = 0.0, periodic = True, spinless = False,
-        fermion_transform='bravyi-kitaev'):
+def hamiltonian_qiskit(
+    x_dimension: int,
+    y_dimension: int,
+    tunneling: float,
+    coulomb: float,
+    chemical_potential: float = 0.00,
+    magnetic_field: float = 0.0,
+    periodic: bool = True,
+    spinless: bool = False,
+    fermion_transform='bravyi-kitaev'
+):
     """Create Fermi-Hubbard model Hamiltonian represented in matrix form"""
 
     hubbard_qubit = _hubbard_qubit(
@@ -521,8 +587,8 @@ def hamiltonian_qiskit(x_dimension, y_dimension, tunneling, coulomb,
 
     hubbard_qiskit = _to_qiskit(hubbard_qubit, n_qubits)
 
-  # store the used fermion transform with the hamiltonian to ensure that
-  # the objective function later uses the same transform
+    # store the used fermion transform with the hamiltonian to ensure that
+    # the objective function later uses the same transform
     hubbard_qiskit._fermion_transform = fermion_transform
 
     return hubbard_qiskit
