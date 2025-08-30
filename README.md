@@ -9,13 +9,14 @@ users how to design compiler workflows for their specific use cases.
 ## Installation and Setup
 
 This tutorial requires a recent version of [Python](https://www.python.org/)
-(3.8+) to be installed alongside the following Python packages:
+(3.9+) to be installed alongside the following Python packages:
 
 - BQSKit
 - Qiskit
-- SciPy
 - Jupyter
-- OpenFermion
+
+Some of the notebooks may require additional packages and will provide this
+information in their introduction.
 
 To install Python, visit their [download page](https://www.python.org/downloads/)
 and follow the instructions for your system.
@@ -34,7 +35,7 @@ Create and activate a virtual environment for Python, then install:
 $ python3 -m venv TUTORIAL
 $ source TUTORIAL/bin/activate
 (TUTORIAL) $ python -m pip install --upgrade pip
-(TUTORIAL) $ python -m pip install bqskit qiskit scipy jupyter openfermion
+(TUTORIAL) $ python -m pip install bqskit qiskit jupyter
 ```
 
 ### Windows
@@ -47,5 +48,5 @@ environment, then install:
 $ python3 -m venv TUTORIAL
 $ TUTORIAL\Scripts\activate
 (TUTORIAL) $ python -m pip install --upgrade pip
-(TUTORIAL) $ python -m pip install bqskit qiskit scipy jupyter openfermion
+(TUTORIAL) $ python -m pip install bqskit qiskit jupyter
 ```
