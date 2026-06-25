@@ -1,3 +1,8 @@
 **/.ipynb_checkpoints/*
 .vscode/*
 __pycache__
+
+**/*.o
+**/*.d
+**/*.bin
+ppms/target/*
