@@ -68,7 +68,4 @@ class PPMTranspilePass(BasePass):
             placeholder, qubits, params = item
             new_circuit.append_gate(placeholder, location=qubits, params=params)
 
-        for op in new_circuit.operations():
-            print(op.gate, op.location, op.params)
-
         circuit.become(new_circuit)
