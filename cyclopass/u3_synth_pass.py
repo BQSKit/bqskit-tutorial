@@ -68,7 +68,7 @@ class U3ToTPass(BasePass):
 
         # print(f"Decomposing U3 gates with error tolerance: {error_per_gate}")
 
-        if error_per_gate <= 1e-6:
+        if error_per_gate < 1e-6:
             print(f"Warning: Decomposing U3 gates with error tolerance: {error_per_gate}. This may take a long time so we will skip for now.")
             return
 
