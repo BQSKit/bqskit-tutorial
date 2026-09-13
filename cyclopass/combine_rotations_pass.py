@@ -9,7 +9,7 @@ from bqskit.ir.gates import Reset
 from bqskit.ir.gates.barrier import BarrierPlaceholder
 from bqskit.ir.gates.circuitgate import CircuitGate
 from bqskit.ir.gates.constant.sx import SqrtXGate
-from bqskit.ir.gates.constant.sxdg import SqrtXdgGate
+from bqskit.ft.gates.sxdg import SqrtXdgGate
 from bqskit.ir.gates.parameterized.u3 import U3Gate
 from bqskit.ir.region import CircuitRegion
 

@@ -24,31 +24,32 @@ def cyclo_decompose(un: np.ndarray, epsilon: float) -> tuple[Circuit, bool]:
     Returns:
         Circuit: A circuit that approximates the given unitary.
     """
+    # cyclosynth takes rotation angles, not matrices, so go through the
+    # U3 parameterization (cyclosynth uses the qiskit/bqskit U3 convention).
+    theta, phi, lam = U3Gate().calc_params(UnitaryMatrix(un))
+
     # Use cyclosynth to synthesize the unitary
     synth = cyclosynth.Synthesizer(epsilon=epsilon)
-    result = synth.synthesize(un)
-    if result:
+    result = synth.synthesize_u3(theta, phi, lam)
+    if result and result.gates is not None:
+        # In cyclosynth's gate string the leftmost gate is the leftmost matrix
+        # factor, so append in reverse to build the same product in BQSKit.
+        gate_map = {
+            "H": HGate(), "S": SGate(), "T": TGate(),
+            "X": XGate(), "Y": YGate(), "Z": ZGate(),
+            "s": SdgGate(), "t": TdgGate(),
+        }
         circ = Circuit(1)
         for gate_str in reversed(result.gates):
-            if gate_str == "H":
-                circ.append_gate(HGate(), [0])
-            elif gate_str == "T":
-                circ.append_gate(TGate(), [0])
-            elif gate_str == "S":
-                circ.append_gate(SGate(), [0])
-            elif gate_str == "X":
-                circ.append_gate(XGate(), [0])
-            elif gate_str == "Y":
-                circ.append_gate(YGate(), [0])
-            elif gate_str == "Z":
-                circ.append_gate(ZGate(), [0])
-            elif gate_str == "t":
-                circ.append_gate(TdgGate(), [0])
-            elif gate_str == "s":
-                circ.append_gate(SdgGate(), [0])
+            if gate_str not in gate_map:
+                raise ValueError(
+                    f"cyclosynth returned an unhandled gate {gate_str!r} "
+                    f"in {result.gates!r}."
+                )
+            circ.append_gate(gate_map[gate_str], [0])
         return circ, True
     circ = Circuit(1)
-    circ.append_gate(U3Gate(), [0], params=U3Gate().calc_params(UnitaryMatrix(un)))
+    circ.append_gate(U3Gate(), [0], params=[theta, phi, lam])
     return circ, False
 
 class U3ToTPass(BasePass):
@@ -61,7 +62,13 @@ class U3ToTPass(BasePass):
     async def run(self, circuit: Circuit, data: PassData) -> None:
         """Perform the pass's operation, see :class:`BasePass` for more."""
 
-        error_per_gate = self.epsilon / circuit.count(U3Gate())
+        num_u3s = circuit.count(U3Gate())
+
+        # Nothing to do on a block with no U3 gates (e.g. an all-CNOT block)
+        if num_u3s == 0:
+            return
+
+        error_per_gate = self.epsilon / num_u3s
 
         # Round error per gate to lower power of 10
         error_per_gate = 10 ** np.floor(np.log10(error_per_gate))
