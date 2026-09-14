@@ -55,10 +55,6 @@ def cyclo_decompose(un: np.ndarray, epsilon: float) -> tuple[Circuit, bool]:
 class U3ToTPass(BasePass):
     """Convert all U3 Gates to Clifford + T using cyclosynth"""
 
-    def __init__(self, epsilon: float = 1e-9) -> None:
-        """Construct a U3ToTPass."""
-        self.epsilon = epsilon
-
     async def run(self, circuit: Circuit, data: PassData) -> None:
         """Perform the pass's operation, see :class:`BasePass` for more."""
 
@@ -68,16 +64,20 @@ class U3ToTPass(BasePass):
         if num_u3s == 0:
             return
 
-        error_per_gate = self.epsilon / num_u3s
+        # Try to get error from data
+        algorithmic_error = None
+        for key in data.keys():
+            if 'algorithmic_error' in key:
+                algorithmic_error = data[key]
+                break
+
+        if algorithmic_error is None:
+            raise ValueError('Error must be set to run U3ToTPass.')
+
+        error_per_gate = algorithmic_error / num_u3s
 
         # Round error per gate to lower power of 10
         error_per_gate = 10 ** np.floor(np.log10(error_per_gate))
-
-        # print(f"Decomposing U3 gates with error tolerance: {error_per_gate}")
-
-        if error_per_gate < 1e-6:
-            print(f"Warning: Decomposing U3 gates with error tolerance: {error_per_gate}. This may take a long time so we will skip for now.")
-            return
 
         pts_to_replace = []
         new_ops = []
